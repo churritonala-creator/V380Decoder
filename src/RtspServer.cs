@@ -26,6 +26,13 @@ namespace V380Decoder.src
         private bool isH265 = false;
         private readonly object sdpLock = new();
 
+        // Frames since the last keyframe. Sent as a burst to new sessions so
+        // they get a picture immediately instead of waiting for the next
+        // keyframe (the camera GOP is ~80 frames / ~7 s).
+        private readonly List<FrameData> gop = new();
+        private const int GOP_MAX_FRAMES = 400;
+        private readonly object gopLock = new();
+
         public RtspServer(int port, bool secure, string username, string password)
         {
             this.port = port;
@@ -79,7 +86,23 @@ namespace V380Decoder.src
             {
                 if (f.IsKeyframe) CacheSpsFromIdr(f.Payload);
             }
+
+            lock (gopLock)
+            {
+                if (f.IsKeyframe) gop.Clear();
+                if (f.IsKeyframe || gop.Count > 0)
+                {
+                    if (gop.Count < GOP_MAX_FRAMES) gop.Add(f);
+                }
+            }
+
             foreach (var s in sessions.Values) s.PushVideo(f);
+        }
+
+        // Copy of the current GOP (keyframe first), or empty if none yet
+        public FrameData[] GetGop()
+        {
+            lock (gopLock) return gop.ToArray();
         }
 
         // Called from main receive loop for every complete audio frame

@@ -44,6 +44,8 @@ namespace V380Decoder.src
 
         private bool _mjpegActive = false;
         private byte[] _lastIFrame = null;
+        // H.265 keyframes carry VPS/SPS/PPS inline, so no SPS/PPS prepend is needed
+        private bool _isH265 = false;
         private readonly SemaphoreSlim _snapshotSem = new(1, 1);
 
         public SnapshotManager()
@@ -67,17 +69,18 @@ namespace V380Decoder.src
             LogUtils.debug($"[SNAP] MJPEG {(active ? "enable" : "disabled")}");
         }
 
-        public void UpdateFrame(byte[] h264Frame, int width, int height, bool isIFrame)
+        public void UpdateFrame(byte[] h264Frame, int width, int height, bool isIFrame, bool isH265 = false)
         {
             lock (_lock)
             {
                 _width = width;
                 _height = height;
+                _isH265 = isH265;
             }
 
             if (isIFrame)
             {
-                ExtractSpsAndPps(h264Frame);
+                if (!isH265) ExtractSpsAndPps(h264Frame);
                 lock (_lock) { _lastIFrame = (byte[])h264Frame.Clone(); }
             }
 
@@ -126,17 +129,24 @@ namespace V380Decoder.src
             {
                 byte[] iFrame;
                 int w, h;
-                lock (_lock) { iFrame = _lastIFrame; w = _width; h = _height; }
+                bool h265;
+                lock (_lock) { iFrame = _lastIFrame; w = _width; h = _height; h265 = _isH265; }
 
-                if (iFrame == null || _sps == null || _pps == null)
+                if (iFrame == null || (!h265 && (_sps == null || _pps == null)))
                 {
                     lock (_lock) { return _cachedJpeg; }
                 }
 
-                byte[] input = PrependSpsAndPps(iFrame);
+                if (h265 && !_useFFmpeg)
+                {
+                    // H264Sharp cannot decode HEVC
+                    lock (_lock) { return _cachedJpeg; }
+                }
+
+                byte[] input = h265 ? iFrame : PrependSpsAndPps(iFrame);
 
                 byte[] jpeg = _useFFmpeg
-                    ? await DecodeOneFrameFFmpeg(input)
+                    ? await DecodeOneFrameFFmpeg(input, h265)
                     : DecodeH264Sharp(input, isIFrame: true);
 
                 if (jpeg != null)
@@ -238,7 +248,7 @@ namespace V380Decoder.src
             LogUtils.debug("[SNAP] FFmpeg pipe started");
         }
 
-        private async Task<byte[]> DecodeOneFrameFFmpeg(byte[] h264Data)
+        private async Task<byte[]> DecodeOneFrameFFmpeg(byte[] h264Data, bool h265 = false)
         {
             try
             {
@@ -246,6 +256,7 @@ namespace V380Decoder.src
                 {
                     FileName = "ffmpeg",
                     Arguments = "-hide_banner -loglevel error " +
+                                (h265 ? "-f hevc " : "-f h264 ") +
                                 "-i pipe:0 " +
                                 "-frames:v 1 -q:v 2 -f image2 pipe:1",
                     UseShellExecute = false,

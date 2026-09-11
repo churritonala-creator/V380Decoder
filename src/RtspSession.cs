@@ -1,3 +1,5 @@
+using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Net.Sockets;
 using System.Text;
 
@@ -23,10 +25,22 @@ namespace V380Decoder.src
         private uint videoSsrc = (uint)new Random().Next();
         private uint audioSsrc = (uint)new Random().Next();
 
-        // Monotonically increasing synthetic RTP timestamps
-        private uint _videoRtsClock = 0;
-        private const uint RTP_VIDEO_TICK = 7500;  // ~12 fps at 90 kHz clock
+        // RTP video timestamps come from a monotonic wall clock (90 kHz), so
+        // playback speed follows the real (variable) camera frame rate.
+        // Camera-provided timestamps are unreliable and cause DTS errors.
+        private readonly Stopwatch _clock = Stopwatch.StartNew();
         private uint _audioRtsClock = 0;
+
+        // Per-session send queue. The camera receive loop only enqueues;
+        // a dedicated thread writes to the socket so a slow client never
+        // stalls the camera stream or other sessions.
+        private readonly BlockingCollection<(FrameData frame, bool audio, uint ts)> _queue = new();
+        private Thread _sendThread;
+        private const int MAX_QUEUE = 100;
+        private bool _waitKeyframe;
+        private readonly object _playLock = new();
+        // Added to the wall clock so live frames always come after the burst
+        private uint _tsOffset;
 
         public event Action OnClose;
 
@@ -42,14 +56,33 @@ namespace V380Decoder.src
         {
             readThread = new Thread(ReadLoop) { IsBackground = true, Name = $"rtsp-{id}" };
             readThread.Start();
+            _sendThread = new Thread(SendLoop) { IsBackground = true, Name = $"rtsp-send-{id}" };
+            _sendThread.Start();
         }
 
         public void Close()
         {
             alive = false;
             playing = false;
+            try { _queue.CompleteAdding(); } catch { }
             try { tcp.Close(); } catch { }
             OnClose?.Invoke();
+        }
+
+        uint NowTs() => (uint)(_clock.ElapsedMilliseconds * 90) + _tsOffset;
+
+        void SendLoop()
+        {
+            try
+            {
+                foreach (var (frame, audio, ts) in _queue.GetConsumingEnumerable())
+                {
+                    if (!alive) break;
+                    if (audio) SendAudio(frame);
+                    else SendVideo(frame, ts);
+                }
+            }
+            catch { }
         }
 
         // ── RTSP request reader ──────────────────────────────────
@@ -167,8 +200,20 @@ namespace V380Decoder.src
                     Reply(cseq,
                         "Session: 1",
                         $"RTP-Info: url={url}/trackID=0;seq={videoSeq},url={url}/trackID=1;seq={audioSeq}");
-                    playing = true;
-                    Console.Error.WriteLine($"[RTSP#{id}] playing");
+                    lock (_playLock)
+                    {
+                        // Burst the buffered GOP (keyframe + deltas) with timestamps
+                        // 1 ms apart so the client decodes it at once and shows a
+                        // picture immediately. Live frames continue after it.
+                        var gop = server.GetGop();
+                        uint now = NowTs();
+                        for (int i = 0; i < gop.Length; i++)
+                            _queue.TryAdd((gop[i], false, now + (uint)(i * 90)));
+                        _tsOffset += (uint)(gop.Length * 90);
+                        _waitKeyframe = gop.Length == 0;
+                        playing = true;
+                        Console.Error.WriteLine($"[RTSP#{id}] playing (burst {gop.Length} frames)");
+                    }
                     break;
 
                 case "TEARDOWN":
@@ -201,22 +246,44 @@ namespace V380Decoder.src
             catch { alive = false; }
         }
 
-        // ── RTP video push  (H.264/H.265 Annex-B → RTP NAL/FU-A) ──────
+        // Called from the camera receive loop: enqueue only, never block
         public void PushVideo(FrameData f)
         {
-            if (!playing) return;
-
-            // Use synthetic monotonically increasing RTP timestamps
-            // Camera timestamps are unreliable and cause non-monotonic DTS errors
-            _videoRtsClock += RTP_VIDEO_TICK;
-
-            if (server.IsH265)
+            lock (_playLock)
             {
-                PushVideoH265(f.Payload, _videoRtsClock);
+                if (!playing) return;
+
+                // Client cannot keep up: drop until the next keyframe so the
+                // decoder resyncs instead of accumulating latency.
+                if (_queue.Count > MAX_QUEUE) _waitKeyframe = true;
+                if (_waitKeyframe)
+                {
+                    if (!f.IsKeyframe) return;
+                    _waitKeyframe = false;
+                }
+                _queue.TryAdd((f, false, NowTs()));
+            }
+        }
+
+        public void PushAudio(FrameData f)
+        {
+            lock (_playLock)
+            {
+                if (!playing) return;
+                if (_queue.Count > MAX_QUEUE) return;
+                _queue.TryAdd((f, true, 0));
+            }
+        }
+
+        // ── RTP video send  (H.264/H.265 Annex-B → RTP NAL/FU-A) ──────
+        void SendVideo(FrameData f, uint rts)
+        {
+            if (f.IsH265)
+            {
+                PushVideoH265(f.Payload, rts);
                 return;
             }
 
-            uint rts = _videoRtsClock;
             RtspServer.ParseNals(f.Payload, (nalType, nal) =>
             {
                 const int MTU = 1400;
@@ -311,11 +378,9 @@ namespace V380Decoder.src
             });
         }
 
-        // ── RTP audio push  (PCMA raw samples) ──────────────────
-        public void PushAudio(FrameData f)
+        // ── RTP audio send  (PCMA raw samples) ──────────────────
+        void SendAudio(FrameData f)
         {
-            if (!playing) return;
-
             // Use synthetic RTP timestamps to prevent DTS discontinuities
             // 160 samples per chunk at 8 kHz = 20 ms of audio per RTP packet
             const int CHUNK = 160;

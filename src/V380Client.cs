@@ -425,7 +425,7 @@ namespace V380Decoder.src
                             payload = trimmed;
                         }
 
-                        snapshotManager.UpdateFrame(payload, frameWidth, frameheight, isIFrame: type == 0x00);
+                        snapshotManager.UpdateFrame(payload, frameWidth, frameheight, isIFrame, isH265: type == 0x28 || type == 0x29);
 
                         var fd = new FrameData
                         {
@@ -505,7 +505,7 @@ namespace V380Decoder.src
                     }
                     else
                     {
-                        Console.Error.WriteLine($"[FRAME] unknown type=0x{type:X2} len={payLen}");
+                        LogUtils.debug($"[FRAME] unknown type=0x{type:X2} len={payLen}");
                     }
                 }
             }
