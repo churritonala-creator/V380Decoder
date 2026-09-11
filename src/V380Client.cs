@@ -601,9 +601,10 @@ namespace V380Decoder.src
             return out_;
         }
 
+        private readonly object _sendLock = new();
         bool SendData(NetworkStream s, byte[] d)
         {
-            try { s.Write(d, 0, d.Length); s.Flush(); return true; }
+            try { lock (_sendLock) { s.Write(d, 0, d.Length); s.Flush(); } return true; }
             catch (Exception ex) { Console.Error.WriteLine($"[SEND] {ex.Message}"); return false; }
         }
 
@@ -686,8 +687,63 @@ namespace V380Decoder.src
         readonly List<byte> _talkBuf = new();
         readonly object _talkLock = new();
 
-        public void BeginTalk() { lock (_talkLock) { _encPred = 0; _encIndex = 0; _talkSeq = 0; _talkBuf.Clear(); } }
-        public void EndTalk() { lock (_talkLock) { _talkBuf.Clear(); } }
+        System.Threading.CancellationTokenSource _talkCts;
+        public void BeginTalk()
+        {
+            EndTalk();
+            lock (_talkLock) { _encPred = 0; _encIndex = 0; _talkSeq = 0; _talkBuf.Clear(); }
+            _talkCts = new System.Threading.CancellationTokenSource();
+            var ct = _talkCts.Token;
+            Task.Run(async () => { await TalkSender(ct); });
+        }
+        public void EndTalk()
+        {
+            try { _talkCts?.Cancel(); } catch { }
+            lock (_talkLock) { _talkBuf.Clear(); }
+        }
+
+        // Envía un frame cada ~64ms (ritmo real de 512 muestras @ 8kHz) para no
+        // inundar la cámara. El buffer actúa de cola; PushTalkPcm solo lo llena.
+        async Task TalkSender(System.Threading.CancellationToken ct)
+        {
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            long next = 0;
+            while (!ct.IsCancellationRequested)
+            {
+                byte[] frame = null;
+                lock (_talkLock)
+                {
+                    // Bloque IMA ADPCM WAV estándar: 505 muestras -> 256 bytes
+                    // (header 4B: predictor int16 LE + step index + reservado) + 252B datos.
+                    if (_talkBuf.Count >= 1010)
+                    {
+                        var sm = new short[505];
+                        for (int k = 0; k < 505; k++) sm[k] = (short)(_talkBuf[k * 2] | (_talkBuf[k * 2 + 1] << 8));
+                        _talkBuf.RemoveRange(0, 1010);
+                        var block = new byte[256];
+                        _encPred = sm[0];
+                        block[0] = (byte)(sm[0] & 0xff); block[1] = (byte)((sm[0] >> 8) & 0xff);
+                        block[2] = (byte)_encIndex; block[3] = 0;
+                        for (int i = 0; i < 252; i++)
+                        {
+                            byte lo = EncodeAdpcm(sm[1 + i * 2]);
+                            byte hi = EncodeAdpcm(sm[2 + i * 2]);
+                            block[4 + i] = (byte)(lo | (hi << 4));
+                        }
+                        EncryptAudioFrame(block, 256);
+                        _talkSeq = (_talkSeq % 255) + 1;
+                        frame = new byte[16 + 256];
+                        frame[0] = 0xb4; frame[4] = 0x01; frame[6] = 0x16; frame[14] = 0x01; frame[15] = (byte)_talkSeq;
+                        Array.Copy(block, 0, frame, 16, 256);
+                    }
+                }
+                if (frame != null && streamStream != null) SendData(streamStream, frame);
+                next += 63;
+                long wait = next - sw.ElapsedMilliseconds;
+                if (wait < 1) wait = 1; if (wait > 100) { wait = 63; next = sw.ElapsedMilliseconds + 63; }
+                try { await Task.Delay((int)wait, ct); } catch { break; }
+            }
+        }
 
         byte EncodeAdpcm(short sample)
         {
@@ -716,30 +772,15 @@ namespace V380Decoder.src
             for (int i = 0; i < aligned; i += 16) enc.TransformBlock(data, i, 16, data, i);
         }
 
-        // Empuja PCM16LE mono 8kHz; cada 512 muestras (1024 bytes) manda un frame b4.
+        // Empuja PCM16LE mono 8kHz al buffer; el pacer (TalkSender) manda a ritmo real.
         public void PushTalkPcm(byte[] data, int len)
         {
             if (streamStream == null) return;
             lock (_talkLock)
             {
                 for (int i = 0; i < len; i++) _talkBuf.Add(data[i]);
-                while (_talkBuf.Count >= 1024)
-                {
-                    var adpcm = new byte[256];
-                    for (int j = 0; j < 256; j++)
-                    {
-                        short s0 = (short)(_talkBuf[j * 4] | (_talkBuf[j * 4 + 1] << 8));
-                        short s1 = (short)(_talkBuf[j * 4 + 2] | (_talkBuf[j * 4 + 3] << 8));
-                        adpcm[j] = (byte)(EncodeAdpcm(s0) | (EncodeAdpcm(s1) << 4));
-                    }
-                    _talkBuf.RemoveRange(0, 1024);
-                    EncryptAudioFrame(adpcm, 256);
-                    _talkSeq = (_talkSeq % 255) + 1;
-                    byte[] frame = new byte[16 + 256];
-                    frame[0] = 0xb4; frame[4] = 0x01; frame[6] = 0x16; frame[14] = 0x01; frame[15] = (byte)_talkSeq;
-                    Array.Copy(adpcm, 0, frame, 16, 256);
-                    SendData(streamStream, frame);
-                }
+                // Cap anti-flood: nunca más de ~0.5s en cola.
+                if (_talkBuf.Count > 8192) _talkBuf.RemoveRange(0, _talkBuf.Count - 8192);
             }
         }
 
