@@ -677,6 +677,18 @@ namespace V380Decoder.src
         public bool ImageBW() => SendControl(V380Commands.IMAGE_BW);
         public bool ImageAuto() => SendControl(V380Commands.IMAGE_AUTO);
         public bool ImageFlip() => SendControl(V380Commands.IMAGE_FLIP);
+        // PTZ avanzado (opcode 0xc7): auto-seguimiento y presets/posiciones.
+        // Estructura capturada de la app: c7 00 00 00 <sub u16 LE> 00 00 <param u16 LE> + ceros.
+        public bool PtzAdvanced(ushort sub, ushort param)
+        {
+            var cmd = new byte[16];
+            cmd[0] = 0xc7;
+            cmd[4] = (byte)sub; cmd[5] = (byte)(sub >> 8);
+            cmd[8] = (byte)param; cmd[9] = (byte)(param >> 8);
+            return SendControl(cmd);
+        }
+        public bool TrackOn() => PtzAdvanced(1001, 0);      // c7 e903 p0  (auto-seguimiento ON)
+        public bool GotoPreset(ushort id) => PtzAdvanced(1002, id); // c7 ea03 p<id> (posición A=1100, B=1101)
         public bool AlarmOn() => SendControl(V380Commands.ALARM_ON);
         public bool AlarmOff() => SendControl(V380Commands.ALARM_OFF);
 

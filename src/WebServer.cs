@@ -166,6 +166,13 @@ namespace V380Decoder.src
                 api.MapPost("/api/alarm/on", () => { client.AlarmOn(); LogUtils.debug("[API] Alarm On"); Results.Ok(); });
                 api.MapPost("/api/alarm/off", () => { client.AlarmOff(); LogUtils.debug("[API] Alarm Off"); Results.Ok(); });
 
+                // PTZ avanzado (opcode 0xc7), comandos capturados de la app oficial.
+                api.MapPost("/api/track/on", () => { client.TrackOn(); LogUtils.debug("[API] Track On"); Results.Ok(); });
+                api.MapPost("/api/preset/a", () => { client.GotoPreset(1100); LogUtils.debug("[API] Preset A (1100)"); Results.Ok(); });
+                api.MapPost("/api/preset/b", () => { client.GotoPreset(1101); LogUtils.debug("[API] Preset B (1101)"); Results.Ok(); });
+                // Genérico para experimentar/afinar: /api/ptzadv/{sub}/{param}
+                api.MapPost("/api/ptzadv/{sub:int}/{param:int}", (int sub, int param) => { client.PtzAdvanced((ushort)sub, (ushort)param); LogUtils.debug($"[API] PtzAdv sub={sub} param={param}"); Results.Ok(); });
+
                 api.Map("/api/talk", async (HttpContext ctx) =>
                 {
                     if (!ctx.WebSockets.IsWebSocketRequest) { ctx.Response.StatusCode = 400; return; }
