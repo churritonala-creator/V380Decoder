@@ -687,8 +687,10 @@ namespace V380Decoder.src
             cmd[8] = (byte)param; cmd[9] = (byte)(param >> 8);
             return SendControl(cmd);
         }
-        public bool TrackOn() => PtzAdvanced(1001, 0);      // c7 e903 p0  (auto-seguimiento ON)
-        public bool GotoPreset(ushort id) => PtzAdvanced(1002, id); // c7 ea03 p<id> (posición A=1100, B=1101)
+        // Confirmado con captura (una acción por vez): seguimiento ON/OFF comparten sub 1002.
+        public bool TrackOn()  => PtzAdvanced(1002, 1100);  // c7 ea03 p1100 (encender seguimiento)
+        public bool TrackOff() => PtzAdvanced(1002, 1101);  // c7 ea03 p1101 (apagar seguimiento)
+        public bool GuardZone() => PtzAdvanced(1001, 0);    // c7 e903 p0    (fijar zona de guardia)
         public bool AlarmOn() => SendControl(V380Commands.ALARM_ON);
         public bool AlarmOff() => SendControl(V380Commands.ALARM_OFF);
 

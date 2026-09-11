@@ -168,8 +168,8 @@ namespace V380Decoder.src
 
                 // PTZ avanzado (opcode 0xc7), comandos capturados de la app oficial.
                 api.MapPost("/api/track/on", () => { client.TrackOn(); LogUtils.debug("[API] Track On"); Results.Ok(); });
-                api.MapPost("/api/preset/a", () => { client.GotoPreset(1100); LogUtils.debug("[API] Preset A (1100)"); Results.Ok(); });
-                api.MapPost("/api/preset/b", () => { client.GotoPreset(1101); LogUtils.debug("[API] Preset B (1101)"); Results.Ok(); });
+                api.MapPost("/api/track/off", () => { client.TrackOff(); LogUtils.debug("[API] Track Off"); Results.Ok(); });
+                api.MapPost("/api/guard/set", () => { client.GuardZone(); LogUtils.debug("[API] Guard Zone"); Results.Ok(); });
                 // Genérico para experimentar/afinar: /api/ptzadv/{sub}/{param}
                 api.MapPost("/api/ptzadv/{sub:int}/{param:int}", (int sub, int param) => { client.PtzAdvanced((ushort)sub, (ushort)param); LogUtils.debug($"[API] PtzAdv sub={sub} param={param}"); Results.Ok(); });
 
