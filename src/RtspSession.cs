@@ -281,6 +281,8 @@ namespace V380Decoder.src
         // ── RTP video send  (H.264/H.265 Annex-B → RTP NAL/FU-A) ──────
         void SendVideo(FrameData f, uint rts)
         {
+            if (f.IsKeyframe && LogUtils.enableDebug)
+                LogUtils.debug($"[LAT] RTSP#{id} send keyframe frameId={f.FrameId} queue={_queue.Count}");
             if (f.IsH265)
             {
                 PushVideoH265(f.Payload, rts);

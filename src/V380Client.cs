@@ -437,6 +437,12 @@ namespace V380Decoder.src
                             Payload = payload
                         };
 
+                        if (isIFrame && LogUtils.enableDebug)
+                        {
+                            // El timestamp de la cámara es hora local en ms (epoch + offset TZ)
+                            long nowLocal = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + (long)TimeZoneInfo.Local.GetUtcOffset(DateTime.UtcNow).TotalMilliseconds;
+                            LogUtils.debug($"[LAT] keyframe cam->decoder {nowLocal - (long)timestamp} ms (frameId={frameId})");
+                        }
                         if (mode == OutputMode.Video)
                         {
                             stdout.Write(payload, 0, payload.Length);
@@ -632,7 +638,7 @@ namespace V380Decoder.src
         int ReadExact(NetworkStream s, byte[] buf, int off, int cnt)
         {
             int tot = 0;
-            var deadline = DateTime.Now.AddSeconds(15);
+            var deadline = DateTime.Now.AddSeconds(6);
             while (tot < cnt)
             {
                 if (DateTime.Now > deadline)
