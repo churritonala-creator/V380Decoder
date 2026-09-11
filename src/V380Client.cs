@@ -668,6 +668,8 @@ namespace V380Decoder.src
         public bool ImageBW() => SendControl(V380Commands.IMAGE_BW);
         public bool ImageAuto() => SendControl(V380Commands.IMAGE_AUTO);
         public bool ImageFlip() => SendControl(V380Commands.IMAGE_FLIP);
+        public bool AlarmOn() => SendControl(V380Commands.ALARM_ON);
+        public bool AlarmOff() => SendControl(V380Commands.ALARM_OFF);
         private bool SendControl(byte[] payload)
         {
             if (streamStream == null) return false;

@@ -161,6 +161,9 @@ namespace V380Decoder.src
                 api.MapPost("/api/light/off", () => { client.LightOff(); LogUtils.debug("[API] Light Off"); Results.Ok(); });
                 api.MapPost("/api/light/auto", () => { client.LightAuto(); LogUtils.debug("[API] Light Auto"); Results.Ok(); });
 
+                api.MapPost("/api/alarm/on", () => { client.AlarmOn(); LogUtils.debug("[API] Alarm On"); Results.Ok(); });
+                api.MapPost("/api/alarm/off", () => { client.AlarmOff(); LogUtils.debug("[API] Alarm Off"); Results.Ok(); });
+
                 api.MapPost("/api/image/color", () => { client.ImageColor(); LogUtils.debug("[API] Image Color"); Results.Ok(); });
                 api.MapPost("/api/image/bw", () => { client.ImageBW(); LogUtils.debug("[API] Image B&W"); Results.Ok(); });
                 api.MapPost("/api/image/auto", () => { client.ImageAuto(); LogUtils.debug("[API] Image Auto"); Results.Ok(); });
