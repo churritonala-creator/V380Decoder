@@ -688,10 +688,32 @@ namespace V380Decoder.src
         readonly object _talkLock = new();
 
         System.Threading.CancellationTokenSource _talkCts;
+        TcpClient _talkClient;
+        NetworkStream _talkStream;
         public void BeginTalk()
         {
             EndTalk();
             lock (_talkLock) { _encPred = 0; _encIndex = 0; _talkSeq = 0; _talkBuf.Clear(); }
+            // Conexión DEDICADA para el talk (la app usa una conexión aparte del video).
+            try
+            {
+                _talkClient = new TcpClient { NoDelay = true };
+                var ar = _talkClient.BeginConnect(ip, port, null, null);
+                if (!ar.AsyncWaitHandle.WaitOne(TimeSpan.FromSeconds(4))) { EndTalk(); return; }
+                _talkClient.EndConnect(ar);
+                _talkStream = _talkClient.GetStream();
+                // cmd 377 -> habilita el canal de audio de subida; respuesta cmd 477 (16B).
+                var cmd377 = new byte[256];
+                WriteUInt32LE(cmd377, 0, 377);
+                WriteUInt32LE(cmd377, 4, deviceId);
+                WriteUInt32LE(cmd377, 8, authTicket);
+                _talkStream.Write(cmd377, 0, 256); _talkStream.Flush();
+                var r = new byte[16]; int tot = 0;
+                var dl = DateTime.Now.AddSeconds(3);
+                while (tot < 16 && DateTime.Now < dl) { if (!_talkStream.DataAvailable) { Thread.Sleep(5); continue; } int n = _talkStream.Read(r, tot, 16 - tot); if (n <= 0) break; tot += n; }
+                LogUtils.debug($"[TALK] 377 resp={BitConverter.ToString(r, 0, tot)}");
+            }
+            catch (Exception e) { Console.Error.WriteLine($"[TALK] connect fail: {e.Message}"); EndTalk(); return; }
             _talkCts = new System.Threading.CancellationTokenSource();
             var ct = _talkCts.Token;
             Task.Run(async () => { await TalkSender(ct); });
@@ -700,6 +722,9 @@ namespace V380Decoder.src
         {
             try { _talkCts?.Cancel(); } catch { }
             lock (_talkLock) { _talkBuf.Clear(); }
+            try { _talkStream?.Close(); } catch { }
+            try { _talkClient?.Close(); } catch { }
+            _talkStream = null; _talkClient = null;
         }
 
         // Envía un frame cada ~64ms (ritmo real de 512 muestras @ 8kHz) para no
@@ -737,7 +762,8 @@ namespace V380Decoder.src
                         Array.Copy(block, 0, frame, 16, 256);
                     }
                 }
-                if (frame != null && streamStream != null) SendData(streamStream, frame);
+                if (frame != null && _talkStream != null)
+                    try { _talkStream.Write(frame, 0, frame.Length); _talkStream.Flush(); } catch { break; }
                 next += 63;
                 long wait = next - sw.ElapsedMilliseconds;
                 if (wait < 1) wait = 1; if (wait > 100) { wait = 63; next = sw.ElapsedMilliseconds + 63; }
@@ -775,7 +801,7 @@ namespace V380Decoder.src
         // Empuja PCM16LE mono 8kHz al buffer; el pacer (TalkSender) manda a ritmo real.
         public void PushTalkPcm(byte[] data, int len)
         {
-            if (streamStream == null) return;
+            if (_talkStream == null) return;
             lock (_talkLock)
             {
                 for (int i = 0; i < len; i++) _talkBuf.Add(data[i]);
