@@ -1,4 +1,5 @@
 using System.Text;
+using System.Net.WebSockets;
 using System.Text.RegularExpressions;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
@@ -57,6 +58,7 @@ namespace V380Decoder.src
             });
 
             app = builder.Build();
+            app.UseWebSockets();
 
             RouteGroupBuilder api = app.MapGroup("/");
             if (secure)
@@ -163,6 +165,27 @@ namespace V380Decoder.src
 
                 api.MapPost("/api/alarm/on", () => { client.AlarmOn(); LogUtils.debug("[API] Alarm On"); Results.Ok(); });
                 api.MapPost("/api/alarm/off", () => { client.AlarmOff(); LogUtils.debug("[API] Alarm Off"); Results.Ok(); });
+
+                api.Map("/api/talk", async (HttpContext ctx) =>
+                {
+                    if (!ctx.WebSockets.IsWebSocketRequest) { ctx.Response.StatusCode = 400; return; }
+                    using var ws = await ctx.WebSockets.AcceptWebSocketAsync();
+                    LogUtils.debug("[TALK] start");
+                    client.BeginTalk();
+                    var buf = new byte[8192];
+                    try
+                    {
+                        while (ws.State == WebSocketState.Open)
+                        {
+                            var r = await ws.ReceiveAsync(buf, System.Threading.CancellationToken.None);
+                            if (r.MessageType == WebSocketMessageType.Close) break;
+                            if (r.Count > 0) client.PushTalkPcm(buf, r.Count);
+                        }
+                    }
+                    catch { }
+                    client.EndTalk();
+                    LogUtils.debug("[TALK] stop");
+                });
 
                 api.MapPost("/api/image/color", () => { client.ImageColor(); LogUtils.debug("[API] Image Color"); Results.Ok(); });
                 api.MapPost("/api/image/bw", () => { client.ImageBW(); LogUtils.debug("[API] Image B&W"); Results.Ok(); });

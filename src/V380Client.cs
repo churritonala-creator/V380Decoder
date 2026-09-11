@@ -670,6 +670,79 @@ namespace V380Decoder.src
         public bool ImageFlip() => SendControl(V380Commands.IMAGE_FLIP);
         public bool AlarmOn() => SendControl(V380Commands.ALARM_ON);
         public bool AlarmOff() => SendControl(V380Commands.ALARM_OFF);
+
+        // ── Two-way audio (hablar) ──────────────────────────────────────
+        // Recibe PCM16 mono 8kHz, lo encodea IMA ADPCM 4-bit, lo cifra con la
+        // media key (AES-128-ECB) y lo manda con el header 0xb4 + seq incremental.
+        // Formato obtenido capturando el intercom real de la app V380 (fw32).
+        static readonly int[] ADPCM_STEP = {
+            7,8,9,10,11,12,13,14,16,17,19,21,23,25,28,31,34,37,41,45,50,55,60,66,73,80,88,97,107,118,
+            130,143,157,173,190,209,230,253,279,307,337,371,408,449,494,544,598,658,724,796,876,963,
+            1060,1166,1282,1411,1552,1707,1878,2066,2272,2499,2749,3024,3327,3660,4026,4428,4871,5358,
+            5894,6484,7132,7845,8630,9493,10442,11487,12635,13899,15289,16818,18500,20350,22385,24623,
+            27086,29794,32767 };
+        static readonly int[] ADPCM_IDX = { -1,-1,-1,-1,2,4,6,8,-1,-1,-1,-1,2,4,6,8 };
+        int _encPred = 0, _encIndex = 0, _talkSeq = 0;
+        readonly List<byte> _talkBuf = new();
+        readonly object _talkLock = new();
+
+        public void BeginTalk() { lock (_talkLock) { _encPred = 0; _encIndex = 0; _talkSeq = 0; _talkBuf.Clear(); } }
+        public void EndTalk() { lock (_talkLock) { _talkBuf.Clear(); } }
+
+        byte EncodeAdpcm(short sample)
+        {
+            int step = ADPCM_STEP[_encIndex];
+            int diff = sample - _encPred;
+            int sign = 0; if (diff < 0) { sign = 8; diff = -diff; }
+            int delta = 0, vpdiff = step >> 3;
+            if (diff >= step) { delta |= 4; diff -= step; vpdiff += step; }
+            step >>= 1; if (diff >= step) { delta |= 2; diff -= step; vpdiff += step; }
+            step >>= 1; if (diff >= step) { delta |= 1; vpdiff += step; }
+            _encPred += (sign != 0) ? -vpdiff : vpdiff;
+            if (_encPred > 32767) _encPred = 32767; else if (_encPred < -32768) _encPred = -32768;
+            delta |= sign;
+            _encIndex += ADPCM_IDX[delta];
+            if (_encIndex < 0) _encIndex = 0; else if (_encIndex > 88) _encIndex = 88;
+            return (byte)delta;
+        }
+
+        void EncryptAudioFrame(byte[] data, int length)
+        {
+            int aligned = (length / 16) * 16; if (aligned == 0) return;
+            using var aes = System.Security.Cryptography.Aes.Create();
+            aes.Key = aesKey; aes.Mode = System.Security.Cryptography.CipherMode.ECB;
+            aes.Padding = System.Security.Cryptography.PaddingMode.None;
+            using var enc = aes.CreateEncryptor();
+            for (int i = 0; i < aligned; i += 16) enc.TransformBlock(data, i, 16, data, i);
+        }
+
+        // Empuja PCM16LE mono 8kHz; cada 512 muestras (1024 bytes) manda un frame b4.
+        public void PushTalkPcm(byte[] data, int len)
+        {
+            if (streamStream == null) return;
+            lock (_talkLock)
+            {
+                for (int i = 0; i < len; i++) _talkBuf.Add(data[i]);
+                while (_talkBuf.Count >= 1024)
+                {
+                    var adpcm = new byte[256];
+                    for (int j = 0; j < 256; j++)
+                    {
+                        short s0 = (short)(_talkBuf[j * 4] | (_talkBuf[j * 4 + 1] << 8));
+                        short s1 = (short)(_talkBuf[j * 4 + 2] | (_talkBuf[j * 4 + 3] << 8));
+                        adpcm[j] = (byte)(EncodeAdpcm(s0) | (EncodeAdpcm(s1) << 4));
+                    }
+                    _talkBuf.RemoveRange(0, 1024);
+                    EncryptAudioFrame(adpcm, 256);
+                    _talkSeq = (_talkSeq % 255) + 1;
+                    byte[] frame = new byte[16 + 256];
+                    frame[0] = 0xb4; frame[4] = 0x01; frame[6] = 0x16; frame[14] = 0x01; frame[15] = (byte)_talkSeq;
+                    Array.Copy(adpcm, 0, frame, 16, 256);
+                    SendData(streamStream, frame);
+                }
+            }
+        }
+
         private bool SendControl(byte[] payload)
         {
             if (streamStream == null) return false;
