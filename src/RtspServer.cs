@@ -105,10 +105,66 @@ namespace V380Decoder.src
             lock (gopLock) return gop.ToArray();
         }
 
+        // Audio codec, learned from the first audio frame (PCMA vs AAC/ADTS).
+        // For AAC the AudioSpecificConfig (SDP "config=") is derived from the ADTS header.
+        private volatile bool audioKnown;
+        private bool audioAac;
+        private string aacConfigHex = "1588"; // AAC-LC 8 kHz mono (default for fw32)
+        private int aacSampleRate = 8000, aacChannels = 1;
+        public bool AudioKnown => audioKnown;
+
         // Called from main receive loop for every complete audio frame
         public void PushAudio(FrameData f)
         {
+            if (!audioKnown)
+            {
+                lock (sdpLock)
+                {
+                    if (!audioKnown)
+                    {
+                        audioAac = f.IsAac;
+                        if (f.IsAac && TryParseAdts(f.Payload, out int objType, out int sfIdx, out int ch))
+                        {
+                            int[] rates = { 96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350 };
+                            aacSampleRate = sfIdx < rates.Length ? rates[sfIdx] : 8000;
+                            aacChannels = ch == 0 ? 1 : ch;
+                            // AudioSpecificConfig: objectType(5) sfIdx(4) channels(4) + 3 bits de relleno
+                            int cfg = (objType << 11) | (sfIdx << 7) | (aacChannels << 3);
+                            aacConfigHex = cfg.ToString("X4");
+                        }
+                        audioKnown = true;
+                        Console.Error.WriteLine(audioAac
+                            ? $"[RTSP] audio: AAC-LC {aacSampleRate} Hz ch={aacChannels} (config={aacConfigHex})"
+                            : "[RTSP] audio: PCMA 8000 Hz");
+                    }
+                }
+            }
             foreach (var s in sessions.Values) s.PushAudio(f);
+        }
+
+        // ADTS header: syncword(12) id(1) layer(2) protection_absent(1) profile(2) sfIdx(4) private(1) ch(3) ...
+        internal static bool TryParseAdts(byte[] d, out int objType, out int sfIdx, out int ch)
+        {
+            objType = 2; sfIdx = 11; ch = 1;
+            if (d == null || d.Length < 7 || d[0] != 0xFF || (d[1] & 0xF0) != 0xF0) return false;
+            objType = (d[2] >> 6) + 1;
+            sfIdx = (d[2] >> 2) & 0x0F;
+            ch = ((d[2] & 1) << 2) | (d[3] >> 6);
+            return true;
+        }
+
+        string AudioSdp()
+        {
+            if (audioAac)
+                return
+                    "m=audio 0 RTP/AVP 97\r\n" +
+                    $"a=rtpmap:97 MPEG4-GENERIC/{aacSampleRate}/{aacChannels}\r\n" +
+                    $"a=fmtp:97 streamtype=5;profile-level-id=1;mode=AAC-hbr;sizelength=13;indexlength=3;indexdeltalength=3;config={aacConfigHex}\r\n" +
+                    "a=control:trackID=1\r\n";
+            return
+                "m=audio 0 RTP/AVP 8\r\n" +
+                "a=rtpmap:8 PCMA/8000/1\r\n" +
+                "a=control:trackID=1\r\n";
         }
 
         // ── H.264 SPS/PPS extraction ───────────────────────────────────
@@ -232,9 +288,7 @@ namespace V380Decoder.src
                         "a=rtpmap:96 H265/90000\r\n" +
                         $"a=fmtp:96 packetization-mode=1;sprop-vps={vpsB64};sprop-sps={spsB64};sprop-pps={ppsB64}\r\n" +
                         "a=control:trackID=0\r\n" +
-                        "m=audio 0 RTP/AVP 8\r\n" +
-                        "a=rtpmap:8 PCMA/8000/1\r\n" +
-                        "a=control:trackID=1\r\n";
+                        AudioSdp();
                 }
 
                 string fmtp = "";
@@ -258,9 +312,7 @@ namespace V380Decoder.src
                     "a=rtpmap:96 H264/90000\r\n" +
                     fmtp +
                     "a=control:trackID=0\r\n" +
-                    "m=audio 0 RTP/AVP 8\r\n" +
-                    "a=rtpmap:8 PCMA/8000/1\r\n" +
-                    "a=control:trackID=1\r\n";
+                    AudioSdp();
             }
         }
 

@@ -174,6 +174,9 @@ namespace V380Decoder.src
 
                 case "DESCRIBE":
                     {
+                        // The audio codec (PCMA vs AAC) is only known after the first audio
+                        // frame; give it a moment so the SDP is right for early clients.
+                        for (int i = 0; i < 20 && !server.AudioKnown; i++) Thread.Sleep(50);
                         string sdp = server.BuildSdp();
                         byte[] body = Encoding.ASCII.GetBytes(sdp);
                         Send($"RTSP/1.0 200 OK\r\nCSeq: {cseq}\r\n" +
@@ -378,9 +381,10 @@ namespace V380Decoder.src
             });
         }
 
-        // ── RTP audio send  (PCMA raw samples) ──────────────────
+        // ── RTP audio send  (PCMA raw samples, or AAC per RFC 3640) ──────
         void SendAudio(FrameData f)
         {
+            if (f.IsAac) { SendAudioAac(f); return; }
             // Use synthetic RTP timestamps to prevent DTS discontinuities
             // 160 samples per chunk at 8 kHz = 20 ms of audio per RTP packet
             const int CHUNK = 160;
@@ -391,6 +395,25 @@ namespace V380Decoder.src
                         f.Payload, off, len, marker: false);
                 _audioRtsClock += (uint)CHUNK;
             }
+        }
+
+        // AAC-hbr (RFC 3640): one ADTS frame per RTP packet. Strip the 7/9-byte ADTS
+        // header; payload = AU-headers-length (16 bits) + one AU-header (13-bit size,
+        // 3-bit index) + raw AAC access unit. Clock = sample rate, 1024 samples per frame.
+        void SendAudioAac(FrameData f)
+        {
+            var d = f.Payload;
+            if (d == null || d.Length < 7) return;
+            int hdr = (d[0] == 0xFF && (d[1] & 0xF0) == 0xF0) ? ((d[1] & 1) == 1 ? 7 : 9) : 0;
+            int auLen = d.Length - hdr;
+            if (auLen <= 0) return;
+            var pkt = new byte[4 + auLen];
+            pkt[0] = 0x00; pkt[1] = 0x10;                 // AU-headers-length = 16 bits
+            pkt[2] = (byte)(auLen >> 5);                  // AU-size (13 bits) ...
+            pkt[3] = (byte)((auLen & 0x1F) << 3);         // ... + AU-index (3 bits) = 0
+            Array.Copy(d, hdr, pkt, 4, auLen);
+            SendRtp(audioCh, 97, audioSeq++, _audioRtsClock, audioSsrc, pkt, 0, pkt.Length, marker: true);
+            _audioRtsClock += 1024;
         }
 
         // ── Low-level RTP sender with RTSP interleaved framing ───

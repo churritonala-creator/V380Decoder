@@ -14,6 +14,10 @@ This is a port of [prsyahmi/v380](https://github.com/prsyahmi/v380) with signifi
 
 **Note:** I've only tested with 2 V380 cameras running device version 31 with H264 stream.
 
+Firmware 32 cameras (H.265) send audio as frame type `0x18` = AAC-LC 8 kHz mono (ADTS, AES-encrypted
+like the rest). The RTSP server advertises it as `MPEG4-GENERIC` (RFC 3640) instead of PCMA, so
+recorders can `-c:a copy` it into MP4.
+
 **Camera 1:**
 - Software: `AppEV2W_VA3_V2.5.9.5_20231211`
 - Firmware: `Hw_AWT3710D_XHR_V1.0_WF_20230519`
@@ -63,7 +67,10 @@ Download Latest [Release](https://github.com/PyanSofyan/V380decoder/releases/lat
 
 ### Audio Output (pipe to FFplay)
 ```bash
+# Firmware <= 31 (PCM a-law):
 ./V380Decoder --id 12345678 --username admin --password password --ip 192.168.1.2 --output audio | ffplay -f alaw -ar 8000 -ac 1 -i pipe:0
+# Firmware 32 (AAC-LC in ADTS):
+./V380Decoder --id 12345678 --username admin --password password --ip 192.168.1.2 --output audio | ffplay -f aac -i pipe:0
 ```
 
 ### RTSP Server

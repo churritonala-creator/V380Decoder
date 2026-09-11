@@ -448,8 +448,10 @@ namespace V380Decoder.src
                         }
                     }
 
-                    // AUDIO  0x1A
-                    else if (type == 0x1A)
+                    // AUDIO  0x1A = PCM a-law 8 kHz (fw <=31)
+                    //        0x18 = AAC-LC en ADTS (fw 32; 8 kHz mono, 1024 muestras/frame)
+                    // Ambos van cifrados con AES-ECB (media key) sobre la parte alineada a 16 bytes.
+                    else if (type == 0x1A || type == 0x18)
                     {
                         if (curFrame == 0) { audioFrags.Clear(); audioTotal = totalFrame; }
                         if (totalFrame != audioTotal) { audioFrags.Clear(); audioTotal = totalFrame; }
